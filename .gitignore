@@ -1,0 +1,20 @@
+.DS_Store
+
+# Ignore model files and training outputs
+utils/models/
+utils/clip_training_output/
+utils/decoder_training_output/
+
+# Ignore Python virtual environment folders (common practice)
+venv/
+.venv/
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore IDE/editor specific files (examples)
+.vscode/
+.idea/
+*.swp 
