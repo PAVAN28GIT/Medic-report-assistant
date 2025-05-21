@@ -4,7 +4,8 @@ import os
 from PIL import Image
 
 # Backend API endpoints
-BACKEND_UPLOAD_URL = "http://localhost:5001/upload_image" # Assuming backend runs on port 5001
+BACKEND_UPLOAD_URL = "http://localhost:5001/upload_image" 
+BACKEND_ANALYZE_UNCERTAINTY_URL = "http://localhost:5001/analyze_uncertainty"
 BACKEND_CHAT_URL = "http://localhost:5001/chat"
 
 st.set_page_config(layout="wide", page_title="Medical Report Generator & Chat")
@@ -67,18 +68,39 @@ st.markdown("""
         float: left;
         clear: both;
     }
+    .sentence-uncertainty-item {
+        margin-bottom: 8px; 
+        padding: 4px 0; 
+        color: #e0e0e0; 
+        line-height: 1.5;
+    }
+    .uncertainty-score {
+        font-weight: bold;
+        color: #007bff; /* Blue score */
+        margin-right: 10px;
+        display: inline-block; /* Keep score and text on same line if possible */
+    }
+    .sentence-text {
+        display: inline; /* Allow sentence text to flow normally */
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # --- Session State Initialization ---
-if 'uploaded_image' not in st.session_state:
-    st.session_state.uploaded_image = None
-if 'initial_report' not in st.session_state:
-    st.session_state.initial_report = None
+if 'uploaded_file_bytes' not in st.session_state: # Store the bytes of the uploaded file
+    st.session_state.uploaded_file_bytes = None
+if 'uploaded_file_name' not in st.session_state:
+    st.session_state.uploaded_file_name = None
+if 'initial_report_text' not in st.session_state: # Store the raw text string
+    st.session_state.initial_report_text = None
+if 'scored_sentences' not in st.session_state: 
+    st.session_state.scored_sentences = []
 if 'expanded_report' not in st.session_state:
     st.session_state.expanded_report = None
-if 'report_generated' not in st.session_state:
-    st.session_state.report_generated = False
+if 'reports_generated' not in st.session_state: # Main reports (initial & expanded)
+    st.session_state.reports_generated = False
+if 'uncertainty_analyzed' not in st.session_state:
+    st.session_state.uncertainty_analyzed = False
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = [] 
 if 'user_input_for_send' not in st.session_state: 
@@ -90,76 +112,110 @@ MIN_EXPANDED_REPORT_LENGTH = 100 # Threshold for considering an expanded report 
 st.title("Radiology Report Assistant")
 st.markdown("Upload an X-ray image to generate a detailed medical report and chat with our AI assistant.")
 
-# --- File Uploader and Report Generation ---
-uploaded_file = st.file_uploader("Choose an X-ray image...", type=["png", "jpg", "jpeg"])
+# --- File Uploader ---
+# We handle the uploaded_file object directly now
+uploaded_file_obj = st.file_uploader("Choose an X-ray image...", type=["png", "jpg", "jpeg"], key="file_uploader")
 
-if uploaded_file is not None:
-    st.session_state.uploaded_image = uploaded_file
-    st.image(uploaded_file, caption="Uploaded X-ray", width=300)
+if uploaded_file_obj is not None:
+    # Display image immediately
+    st.image(uploaded_file_obj, caption="Uploaded X-ray", width=300)
+    # Store file bytes and name for later use (e.g., uncertainty analysis)
+    st.session_state.uploaded_file_bytes = uploaded_file_obj.getvalue()
+    st.session_state.uploaded_file_name = uploaded_file_obj.name
 
-    if st.button("Generate Report", key="generate_report_button"):
-        with st.spinner("Processing image and generating report... This may take a moment."):
-            files = {'file': (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-            try:
-                response = requests.post(BACKEND_UPLOAD_URL, files=files, timeout=120) 
-                response.raise_for_status()  
-                
-                data = response.json()
-                st.session_state.initial_report = data.get("initial_report")
-                st.session_state.expanded_report = data.get("expanded_report")
-                
-                # Check if expanded report is substantial enough
-                is_expanded_report_valid = (st.session_state.expanded_report and 
-                                            st.session_state.expanded_report.strip() and 
-                                            len(st.session_state.expanded_report.strip()) > MIN_EXPANDED_REPORT_LENGTH)
+    # --- Generate Initial & Expanded Report Button ---
+    if st.button("Generate Report", key="generate_reports_button"):
+        if st.session_state.uploaded_file_bytes:
+            with st.spinner("Generating reports this may take a while..."):
+                files = {'file': (st.session_state.uploaded_file_name, st.session_state.uploaded_file_bytes, uploaded_file_obj.type)}
+                try:
+                    response = requests.post(BACKEND_UPLOAD_URL, files=files, timeout=120) 
+                    response.raise_for_status()  
+                    data = response.json()
+                    
+                    st.session_state.initial_report_text = data.get("initial_report")
+                    st.session_state.expanded_report = data.get("expanded_report")
+                    st.session_state.scored_sentences = [] # Reset if new report is generated
+                    st.session_state.uncertainty_analyzed = False # Reset flag
 
-                if is_expanded_report_valid: 
-                    st.session_state.report_generated = True
-                    st.session_state.chat_history = [] 
-                    st.success("Report generated successfully!")
-                elif st.session_state.initial_report and st.session_state.initial_report.strip(): 
-                    st.session_state.report_generated = True 
-                    st.session_state.chat_history = []
-                    error_message = data.get('error', 'Expanded report could not be generated or was too short.')
-                    st.warning(f"Initial report generated, but comprehensive report failed or was incomplete: {error_message}")
-                    st.session_state.expanded_report = None # Ensure it's None if not valid
-                else: 
-                    error_message = data.get('error', 'Unknown error from backend')
-                    st.error(f"Failed to generate report. Backend error: {error_message}")
-                    st.session_state.report_generated = False
-                    st.session_state.initial_report = None # Clear if all failed
-                    st.session_state.expanded_report = None
+                    is_expanded_report_valid = (st.session_state.expanded_report and 
+                                                st.session_state.expanded_report.strip() and 
+                                                len(st.session_state.expanded_report.strip()) > MIN_EXPANDED_REPORT_LENGTH)
+                    
+                    if st.session_state.initial_report_text or is_expanded_report_valid:
+                        st.session_state.reports_generated = True
+                        st.session_state.chat_history = [] 
+                        st.success("Report generated!")
+                        if not is_expanded_report_valid:
+                            st.warning("Expanded report generation failed or was incomplete.")
+                    else: 
+                        error_message = data.get('error', 'Report generation failed.')
+                        st.error(f"Report generation failed: {error_message}")
+                        st.session_state.reports_generated = False
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Error connecting for report generation: {e}")
+                    st.session_state.reports_generated = False
+                except Exception as e:
+                    st.error(f"An unexpected error during report generation: {e}")
+                    st.session_state.reports_generated = False
+        else:
+            st.warning("Please upload an image first.")
 
-            except requests.exceptions.RequestException as e:
-                st.error(f"Error connecting to backend: {e}")
-                st.session_state.report_generated = False
-            except Exception as e:
-                st.error(f"An unexpected error occurred: {e}")
-                st.session_state.report_generated = False
-
-# --- Display Reports ---
-if st.session_state.report_generated:
+# --- Display Reports & Uncertainty Section ---
+if st.session_state.reports_generated:
     st.markdown("---")
 
-    if st.session_state.initial_report and st.session_state.initial_report.strip():
+    # Display Initial Report (plain text or with uncertainty)
+    if st.session_state.uncertainty_analyzed and st.session_state.scored_sentences:
+        st.markdown("<div class='report-header'>Initial Report with Sentence Uncertainty</div>", unsafe_allow_html=True)
+        with st.container():
+            for i, (sentence, score) in enumerate(st.session_state.scored_sentences):
+                try: display_score = float(score) if score is not None else 0.0
+                except (ValueError, TypeError): display_score = 0.0 
+                st.markdown(f"<div class='sentence-uncertainty-item'><span class='sentence-text'>{sentence}</span> <span class='uncertainty-score'>({display_score:.4f})</span></div>", unsafe_allow_html=True)
+    elif st.session_state.initial_report_text and st.session_state.initial_report_text.strip():
         st.markdown("<div class='report-header'>Initial (Raw) Report</div>", unsafe_allow_html=True)
-        st.text_area("Initial Report Content", st.session_state.initial_report, height=150, disabled=True, key="initial_report_display")
-        st.markdown("---") 
+        st.text_area("Initial Report Content", st.session_state.initial_report_text, height=150, disabled=True, key="initial_report_display_text")
+    
+    # Button to trigger uncertainty analysis
+    if st.session_state.initial_report_text and not st.session_state.uncertainty_analyzed:
+        if st.button("Analyze Sentence Uncertainty", key="analyze_uncertainty_button"):
+            if st.session_state.uploaded_file_bytes:
+                with st.spinner("Analyzing sentence uncertainty... This may take some time."):
+                    files_for_ua = {'file': (st.session_state.uploaded_file_name, st.session_state.uploaded_file_bytes, uploaded_file_obj.type if uploaded_file_obj else 'application/octet-stream')}
+                    try:
+                        ua_response = requests.post(BACKEND_ANALYZE_UNCERTAINTY_URL, files=files_for_ua, timeout=180)
+                        ua_response.raise_for_status()
+                        ua_data = ua_response.json()
+                        st.session_state.scored_sentences = ua_data.get("scored_sentences", [])
+                        if st.session_state.scored_sentences:
+                            st.session_state.uncertainty_analyzed = True
+                            st.success("Sentence uncertainty analysis complete!")
+                            st.rerun() # Rerun to update display with scores
+                        else:
+                            st.error(f"Uncertainty analysis returned no sentences. Error: {ua_data.get('error', '')}")
+                    except requests.exceptions.RequestException as e:
+                        st.error(f"Error connecting for uncertainty analysis: {e}")
+                    except Exception as e:
+                        st.error(f"An error during uncertainty analysis: {e}")
+            else:
+                st.warning("Uploaded image data not found. Please re-upload.")
+    elif st.session_state.uncertainty_analyzed:
+        st.info("Sentence uncertainty has been analyzed for the initial report.")
 
-    # Check for substantial expanded report again for display
+    st.markdown("---") 
+
+    # Display Expanded Report (if valid)
     is_expanded_report_display_valid = (st.session_state.expanded_report and 
                                         st.session_state.expanded_report.strip() and 
                                         len(st.session_state.expanded_report.strip()) > MIN_EXPANDED_REPORT_LENGTH)
-
     if is_expanded_report_display_valid:
         st.markdown("<div class='report-header'>Comprehensive Medical Report</div>", unsafe_allow_html=True)
         st.markdown(st.session_state.expanded_report, unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
             
         st.markdown("---")
         st.markdown("<div class='report-header'>Chat with Medical Assistant</div>", unsafe_allow_html=True)
         st.markdown("Ask questions about the comprehensive report below.")
-
         chat_display_container = st.container()
         with chat_display_container:
             for role, message in st.session_state.chat_history:
@@ -171,7 +227,7 @@ if st.session_state.report_generated:
         user_input = st.text_input("Your question:", key="chat_input", placeholder="Type your question here...", value=st.session_state.user_input_for_send)
 
         if st.button("Send", key="send_chat_button"):
-            if user_input and is_expanded_report_display_valid: # Ensure chat only works with valid expanded report
+            if user_input and is_expanded_report_display_valid: 
                 st.session_state.chat_history.append(("user", user_input))
                 st.session_state.user_input_for_send = "" 
                 
@@ -199,16 +255,16 @@ if st.session_state.report_generated:
                     except Exception as e:
                         st.error(f"An unexpected error occurred during chat: {e}")
                         st.session_state.chat_history.append(("assistant", f"Error: {e}."))
-                st.rerun() # CRITICAL: Ensure this is st.rerun()
+                st.rerun() 
 
             elif not is_expanded_report_display_valid:
                 st.warning("Please generate a valid comprehensive report before asking questions.")
             else:
                 st.warning("Please type a question.")
-    elif st.session_state.initial_report and st.session_state.initial_report.strip(): 
-        st.info("Comprehensive report could not be generated or was incomplete. Chat is unavailable.")
+    elif st.session_state.initial_report_text and st.session_state.initial_report_text.strip(): 
+        st.info("Comprehensive report generation failed or was incomplete. Chat is unavailable.")
 
-elif st.session_state.uploaded_image and not st.session_state.report_generated:
+elif uploaded_file_obj and not st.session_state.reports_generated: # Check uploaded_file_obj directly here
     st.info("Click 'Generate Report' to process the uploaded image.")
 
 st.markdown("---")

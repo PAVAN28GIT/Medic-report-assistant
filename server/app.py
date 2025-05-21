@@ -2,15 +2,19 @@ from flask import Flask, request, jsonify
 import os
 import sys
 from werkzeug.utils import secure_filename
+import uuid # For unique temporary filenames if needed, though re-upload is planned
 
 # Add utils directory to sys.path to import inference and other necessary modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'utils')))
 
 try:
     from inference import generate_report as get_initial_report
+    # Import the uncertainty analysis function
+    from uncertaintity_estimate_from_scratch import analyze_image as get_uncertainty_analysis
 except ImportError as e:
     print(f"Error importing modules from utils: {e}")
     get_initial_report = None
+    get_uncertainty_analysis = None # Add placeholder
 
 from google import genai
 
@@ -93,7 +97,7 @@ Generate a well-structured response under each section with 4–6 sentences wher
 
 
 @app.route('/upload_image', methods=['POST'])
-def upload_image():
+def handle_upload_image_for_reports(): # Renamed for clarity
     if 'file' not in request.files:
         return jsonify({"error": "No file part"}), 400
     file = request.files['file']
@@ -101,49 +105,102 @@ def upload_image():
         return jsonify({"error": "No selected file"}), 400
 
     if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        image_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        # We still save it temporarily for inference, then delete.
+        # The frontend will re-send for uncertainty if needed.
+        filename = secure_filename(file.filename) 
+        temp_image_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{uuid.uuid4()}_{filename}")
         try:
-            file.save(image_path)
+            file.save(temp_image_path)
         except Exception as e:
             return jsonify({"error": f"Failed to save file: {str(e)}"}), 500
 
         if not get_initial_report:
-            if os.path.exists(image_path): os.remove(image_path)
-            return jsonify({"error": "Inference module not loaded correctly."}), 500
+            if os.path.exists(temp_image_path): os.remove(temp_image_path)
+            return jsonify({"error": "Initial inference module not loaded."}), 500
 
-        initial_report_tuple = get_initial_report(image_path=image_path)
+        initial_report_tuple = get_initial_report(image_path=temp_image_path)
         if not (initial_report_tuple and initial_report_tuple[0] is not None):
-            if os.path.exists(image_path): os.remove(image_path)
+            if os.path.exists(temp_image_path): os.remove(temp_image_path)
             return jsonify({"error": "Failed to generate initial report from image."}), 500
         
-        initial_report_text = initial_report_tuple[0]
+        initial_report_text_for_expansion = initial_report_tuple[0]
 
-        # Correct the beginning of the initial_report_text if necessary
-        if initial_report_text.startswith("ings:"):
-            initial_report_text = "Findings:" + initial_report_text[len("ings:"):]
+        if initial_report_text_for_expansion.startswith("ings:"):
+            initial_report_text_for_expansion = "Findings:" + initial_report_text_for_expansion[len("ings:"):]
+        elif initial_report_text_for_expansion.startswith("ings "): 
+            initial_report_text_for_expansion = "Findings: " + initial_report_text_for_expansion[len("ings "):]
+        elif initial_report_text_for_expansion.lower().startswith("findings:") and not initial_report_text_for_expansion.startswith("Findings:"):
+            initial_report_text_for_expansion = "Findings:" + initial_report_text_for_expansion[len("findings:"):]
+        elif initial_report_text_for_expansion.lower().startswith("impression:") and not initial_report_text_for_expansion.startswith("Impression:"):
+            initial_report_text_for_expansion = "Impression:" + initial_report_text_for_expansion[len("impression:"):]
 
-        expanded_report_text = generate_expanded_report_from_text(initial_report_text)
+        # Generate expanded report using the (potentially corrected) initial report
+        expanded_report_text = generate_expanded_report_from_text(initial_report_text_for_expansion)
 
-        if os.path.exists(image_path):
+        # Clean up the uploaded file after processing
+        if os.path.exists(temp_image_path):
             try:
-                os.remove(image_path)
+                os.remove(temp_image_path)
             except Exception as e:
-                print(f"Warning: Could not remove uploaded file {image_path}: {e}")
+                print(f"Warning: Could not remove uploaded file {temp_image_path}: {e}")
+
+        response_payload = {
+            "initial_report": initial_report_text_for_expansion, # This is the report for expansion
+            "expanded_report": None,
+        }
 
         if "Error generating expanded report" in expanded_report_text or not expanded_report_text:
-             return jsonify({
-                "initial_report": initial_report_text,
-                "expanded_report": None,
-                "error": expanded_report_text or "Failed to generate expanded report."
-            }), 500
-
-        return jsonify({
-            "initial_report": initial_report_text,
-            "expanded_report": expanded_report_text
-        })
+            response_payload["error"] = expanded_report_text or "Failed to generate expanded report."
+            return jsonify(response_payload), 500 # Send error if expansion failed
+        
+        response_payload["expanded_report"] = expanded_report_text
+        return jsonify(response_payload)
 
     return jsonify({"error": "File type not allowed"}), 400
+
+@app.route('/analyze_uncertainty', methods=['POST'])
+def handle_analyze_uncertainty():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part for uncertainty analysis"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file for uncertainty analysis"}), 400
+
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        # Save image temporarily for this specific analysis
+        temp_image_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{uuid.uuid4()}_{filename}")
+        try:
+            file.save(temp_image_path)
+        except Exception as e:
+            return jsonify({"error": f"Failed to save file for uncertainty: {str(e)}"}), 500
+
+        scored_sentences_for_display = []
+        if get_uncertainty_analysis:
+            try:
+                print(f"Starting on-demand uncertainty analysis for {temp_image_path}")
+                scored_sentences_for_display = get_uncertainty_analysis(image_path=temp_image_path, num_samples=10)
+                print(f"On-demand uncertainty analysis completed. Got {len(scored_sentences_for_display)} scored sentences.")
+            except Exception as ua_exc:
+                print(f"Error during on-demand uncertainty analysis: {ua_exc}")
+                # Clean up even if analysis fails
+                if os.path.exists(temp_image_path): 
+                    try: os.remove(temp_image_path)
+                    except Exception as e_rem: print(f"Warning: Could not remove temp file {temp_image_path} after ua error: {e_rem}")
+                return jsonify({"error": f"Uncertainty analysis failed: {str(ua_exc)}", "scored_sentences": []}), 500
+        else:
+            if os.path.exists(temp_image_path): 
+                try: os.remove(temp_image_path)
+                except Exception as e_rem: print(f"Warning: Could not remove temp file {temp_image_path} as ua module not loaded: {e_rem}")
+            return jsonify({"error": "Uncertainty analysis module not loaded.", "scored_sentences": []}), 500
+        
+        if os.path.exists(temp_image_path):
+            try: os.remove(temp_image_path)
+            except Exception as e: print(f"Warning: Could not remove temp file {temp_image_path} after ua success: {e}")
+
+        return jsonify({"scored_sentences": scored_sentences_for_display})
+    
+    return jsonify({"error": "File type not allowed for uncertainty analysis"}), 400
 
 @app.route('/chat', methods=['POST'])
 def chat_with_gemini():
