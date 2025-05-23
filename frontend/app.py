@@ -7,9 +7,10 @@ import io # Needed for sending bytes as a file
 # Backend API endpoints
 BACKEND_UPLOAD_URL = "http://localhost:5001/upload_image" 
 BACKEND_ANALYZE_UNCERTAINTY_URL = "http://localhost:5001/analyze_uncertainty"
+BACKEND_VISUALIZE_ATTENTION_URL = "http://localhost:5001/visualize_attention"
 BACKEND_CHAT_URL = "http://localhost:5001/chat"
 
-st.set_page_config(layout="wide", page_title="Radiology Report AI Assistant - Final Polish")
+st.set_page_config(layout="wide", page_title="Radiology Report AI Assistant - Attention Viz")
 
 # --- Final Polish Styling ---
 st.markdown("""
@@ -218,7 +219,14 @@ st.markdown("""
         box-shadow: inset 0 2px 4px rgba(0,0,0,0.2) !important; /* Inset shadow for pressed look */
         transform: translateY(1px) !important; /* Slight press down effect */
      }
-
+    .heatmap-gallery img {
+        width: 100%; /* Make heatmap images responsive within their container */
+        max-width: 250px; /* Max size for each heatmap image */
+        height: auto;
+        margin: 5px;
+        border: 1px solid rgba(255,255,255,0.2);
+        border-radius: 4px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -228,11 +236,14 @@ def init_session_state():
         'uploaded_file_bytes': None,
         'uploaded_file_name': None,
         'uploaded_file_type': None,
+        'original_image_filename': None,
         'initial_report_text': None,
         'scored_sentences': [],
         'expanded_report': None,
         'reports_generated': False,
         'uncertainty_analyzed': False,
+        'attention_visualization_term': '',
+        'attention_heatmaps': [],
         'chat_history': [],
         'user_input_for_send': ""
     }
@@ -253,12 +264,13 @@ with st.container(): # Main container for all content cards
     # --- Upload and Generate Card ---
     with st.container():
         st.markdown("<div class='upload-card-content'>", unsafe_allow_html=True)
-        st.markdown("<h2 class='report-header' style='text-align:center; width:100%; color: #e0e0e0;'>Upload X-Ray Image</h2>", unsafe_allow_html=True)
+        if not st.session_state.reports_generated and not st.session_state.uploaded_file_bytes:
+            st.markdown("<h2 class='report-header' style='text-align:center; width:100%; color: #e0e0e0;'>Upload X-Ray Image</h2>", unsafe_allow_html=True)
         
         # Center the file uploader using columns hack or by styling its container
         col_uploader_1, col_uploader_2, col_uploader_3 = st.columns([1,1.8,1])
         with col_uploader_2:
-            uploaded_file_obj = st.file_uploader("", type=["png", "jpg", "jpeg"], key="file_uploader", label_visibility="collapsed")
+            uploaded_file_obj = st.file_uploader("X-ray image uploader for analysis", type=["png", "jpg", "jpeg"], key="file_uploader", label_visibility="collapsed")
 
         if uploaded_file_obj is not None:
             col_img_1, col_img_2, col_img_3 = st.columns([0.5,2,0.5])
@@ -278,10 +290,13 @@ with st.container(): # Main container for all content cards
                             response.raise_for_status()  
                             data = response.json()
                             
+                            st.session_state.original_image_filename = data.get("original_image_filename")
                             st.session_state.initial_report_text = data.get("initial_report")
                             st.session_state.expanded_report = data.get("expanded_report")
                             st.session_state.scored_sentences = [] 
                             st.session_state.uncertainty_analyzed = False 
+                            st.session_state.attention_heatmaps = []
+                            st.session_state.attention_visualization_term = ''
 
                             is_expanded_report_valid = (st.session_state.expanded_report and 
                                                         st.session_state.expanded_report.strip() and 
@@ -348,6 +363,47 @@ with st.container(): # Main container for all content cards
                 st.success("Sentence uncertainty has been analyzed for this report.")
             st.markdown("</div>", unsafe_allow_html=True) # Close Initial Report Card
 
+    # --- Attention Visualization Section ---
+    if st.session_state.initial_report_text and st.session_state.original_image_filename:
+        st.markdown("--- Pavan Kumar K ") # Visual separator
+        st.markdown("<h3 class='report-header'>Attention Map Visualization</h3>", unsafe_allow_html=True)
+        medical_term_input = st.text_input("Enter medical term to visualize attention:", key="medical_term_viz", value=st.session_state.attention_visualization_term)
+        if st.button("Visualize Attention for Term", key="visualize_attention_button", use_container_width=True):
+            if medical_term_input.strip():
+                st.session_state.attention_visualization_term = medical_term_input.strip()
+                with st.spinner(f"Generating attention heatmaps for '{st.session_state.attention_visualization_term}'..."):
+                    payload = {
+                        "image_filename": st.session_state.original_image_filename,
+                        "medical_term": st.session_state.attention_visualization_term
+                    }
+                    try:
+                        viz_response = requests.post(BACKEND_VISUALIZE_ATTENTION_URL, json=payload, timeout=120)
+                        viz_response.raise_for_status()
+                        viz_data = viz_response.json()
+                        st.session_state.attention_heatmaps = viz_data.get("heatmaps", [])
+                        if st.session_state.attention_heatmaps:
+                            st.success(viz_data.get("message", "Heatmaps generated!"))
+                        else:
+                            st.warning(viz_data.get("message", "No heatmaps generated or term not found."))
+                    except requests.exceptions.RequestException as e:
+                        st.error(f"Connection error for attention visualization: {e}")
+                        st.session_state.attention_heatmaps = []
+                    except Exception as e:
+                        st.error(f"Error during attention visualization: {e}")
+                        st.session_state.attention_heatmaps = []
+            else:
+                st.warning("Please enter a medical term to visualize.")
+
+        if st.session_state.attention_heatmaps:
+            st.markdown(f"Displaying attention for: **{st.session_state.attention_visualization_term}**")
+            # Display heatmaps in columns for better layout if multiple are returned
+            # For simplicity, let's display up to 3 in a row.
+            cols = st.columns(min(len(st.session_state.attention_heatmaps), 3))
+            for i, heatmap_url in enumerate(st.session_state.attention_heatmaps):
+                with cols[i % 3]: # Cycle through columns
+                    # The URL from backend should be directly usable if Flask serves static files correctly
+                    st.image(heatmap_url, caption=f"Heatmap {i+1}", use_container_width=True, output_format='PNG') 
+
     # --- Expanded Report & Chat Card (Combined or Separate) ---
     if st.session_state.reports_generated:
         is_expanded_report_display_valid = (st.session_state.expanded_report and 
@@ -377,7 +433,8 @@ with st.container(): # Main container for all content cards
                 
                 # Chat Input - Placed after messages for natural flow
                 user_input_placeholder = "Type your question here..."
-                user_input = st.text_input("", key="chat_input", placeholder=user_input_placeholder, value=st.session_state.user_input_for_send, label_visibility="collapsed")
+                # Provide a descriptive label for accessibility, hide it visually
+                user_input = st.text_input("User question input for chat", key="chat_input", placeholder=user_input_placeholder, value=st.session_state.user_input_for_send, label_visibility="collapsed")
 
                 if st.button("Send", key="send_chat_button", use_container_width=True):
                     if user_input and is_expanded_report_display_valid: 
@@ -397,7 +454,7 @@ with st.container(): # Main container for all content cards
                                 st.error(f"Error communicating with chat backend: {e}")
                                 st.session_state.chat_history.append(("assistant", "Error: Could not reach assistant."))
                             except Exception as e:
-                                st.error(f"An unexpected error during chat: {e}")
+                                st.error(f"An unexpected error occurred during chat: {e}")
                                 st.session_state.chat_history.append(("assistant", f"Error: {e}."))
                         st.rerun() 
                     elif not is_expanded_report_display_valid:

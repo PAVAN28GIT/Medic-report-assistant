@@ -7,11 +7,14 @@ from collections import Counter
 from scipy.stats import entropy
 import nltk
 import time
-import config
+from . import config
 import os
 
 # --- Initialization ---
-nltk.download("punkt", quiet=True)
+try:
+    nltk.download("punkt", quiet=True)
+except Exception as nltk_e:
+    print(f"[UNCERTAINTY_WARN] Failed to download nltk.punkt: {nltk_e}. Sentence tokenization might fail if not already available.")
 
 # --- Configuration (using your project's config) ---
 PROCESSOR_PATH = config.PROCESSOR_SAVE_PATH
@@ -20,35 +23,50 @@ MODEL_PATH = config.DECODER_SAVE_PATH
 DEVICE = config.DEVICE
 
 # --- Load components ---
-print("[INFO] Loading processor, tokenizer, and model...")
-processor = CLIPProcessor.from_pretrained(PROCESSOR_PATH)
-tokenizer = GPT2Tokenizer.from_pretrained(TOKENIZER_PATH)
-model = VisionEncoderDecoderModel.from_pretrained(MODEL_PATH).to(DEVICE)
-model.eval()
+print("[UNCERTAINTY_INFO] Loading processor, tokenizer, and model for uncertainty module...")
+try:
+    processor = CLIPProcessor.from_pretrained(PROCESSOR_PATH)
+    tokenizer = GPT2Tokenizer.from_pretrained(TOKENIZER_PATH)
+    model = VisionEncoderDecoderModel.from_pretrained(MODEL_PATH).to(DEVICE)
+    model.eval()
+    print("[UNCERTAINTY_INFO] Uncertainty components loaded successfully.")
+except Exception as load_e:
+    print(f"[UNCERTAINTY_ERROR] Failed to load components for uncertainty module: {load_e}")
+    processor = None
+    tokenizer = None
+    model = None
 
 # --- Enable dropout at inference ---
-def enable_mc_dropout(m):
-    for module in m.modules():
-        if module.__class__.__name__.startswith('Dropout'):
-            module.train()
+if model:
+    for module_component in model.modules():
+        if module_component.__class__.__name__.startswith('Dropout'):
+            module_component.train()
+else:
+    print("[UNCERTAINTY_WARN] Model not loaded, cannot enable MC Dropout globally for uncertainty module.")
 
 # --- Generate N stochastic reports ---
 def generate_mc_samples(image_path, num_samples=5, max_length=128):
-    print(f"[INFO] Loading and preprocessing image: {image_path}")
+    if not all([processor, tokenizer, model]):
+        print("[UNCERTAINTY_ERROR] MC Sampling cannot proceed: one or more critical components (processor, tokenizer, model) failed to load.")
+        return []
+        
     try:
         image = Image.open(image_path).convert("RGB")
     except FileNotFoundError:
-        print(f"[ERROR] Image not found: {image_path}")
+        print(f"[UNCERTAINTY_ERROR] Image not found: {image_path}")
         return []
+    except Exception as img_e:
+        print(f"[UNCERTAINTY_ERROR] Error loading image {image_path}: {img_e}")
+        return []
+
     inputs = processor(images=image, return_tensors="pt").pixel_values.to(DEVICE)
 
-    enable_mc_dropout(model)
+    for module_component in model.modules():
+        if module_component.__class__.__name__.startswith('Dropout'):
+            module_component.train()
 
     reports = []
-    print(f"[INFO] Starting MC sampling with {num_samples} iterations...")
     for i in range(num_samples):
-        print(f"  → Sampling {i+1}/{num_samples}")
-        start_time = time.time()
         with torch.no_grad():
             output_ids = model.generate(
                 inputs,
@@ -63,23 +81,18 @@ def generate_mc_samples(image_path, num_samples=5, max_length=128):
             )
         decoded = tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
         reports.append(decoded)
-        print(f"    ✓ Report {i+1} generated in {time.time() - start_time:.2f} sec")
     return reports
 
 # --- Compute entropy per sentence position ---
 def sentence_level_uncertainty(reports):
     if not reports:
-        print("[WARN] No reports generated, cannot compute uncertainty.")
         return []
-    print("[INFO] Tokenizing and computing uncertainty across sentences...")
     sentence_lists = [sent_tokenize(r) for r in reports if r]
     if not any(sentence_lists):
-        print("[WARN] All reports were empty after sentence tokenization.")
         return []
 
     max_len = max(len(lst) for lst in sentence_lists if lst) if sentence_lists else 0
     if max_len == 0:
-        print("[WARN] No sentences found in any report.")
         return []
 
     for lst in sentence_lists:
@@ -88,50 +101,40 @@ def sentence_level_uncertainty(reports):
     sentence_columns = list(zip(*sentence_lists))
     sentence_scores = []
 
-    print("    Sentence Group Distributions:")
     for idx, group in enumerate(sentence_columns):
         valid_sentences_in_group = [s for s in group if s != "<PAD_SENTENCE>"]
+        display_sentence = next((s for s in group if s != "<PAD_SENTENCE>"), group[0] if group else "[No Sentence]")
+
         if not valid_sentences_in_group:
             norm_ent = 1.0
-            display_sentence = group[0] if group[0] != "<PAD_SENTENCE>" else "[Padded Position]"
-            print(f"      Group {idx+1}: All padding. Uncertainty set to {norm_ent:.4f}")
         else:
             counts = Counter(valid_sentences_in_group)
             probs = np.array(list(counts.values())) / len(valid_sentences_in_group)
             ent = entropy(probs)
             norm_ent = ent / np.log(len(counts)) if len(counts) > 1 else 0.0
-            display_sentence = next((s for s in group if s != "<PAD_SENTENCE>"), "[Error: No valid sentence]")
-            print(f"      Group {idx+1}: Counts={counts}, Probs={probs}, Entropy={ent:.4f}, NormEntropy={norm_ent:.4f}")
 
         sentence_scores.append((display_sentence, norm_ent))
-
     return sentence_scores
 
 # --- Full Pipeline ---
 def analyze_image(image_path, num_samples=5):
-    print("\n[INFO] Starting uncertainty analysis...")
-    total_start_time = time.time()
-
-    samples = generate_mc_samples(image_path, num_samples=num_samples)
-
-    if not samples:
-        print("[ERROR] Failed to generate MC samples.")
+    if not all([processor, tokenizer, model]):
+        print("[UNCERTAINTY_ERROR] Full analysis cannot proceed: critical components not loaded.")
         return []
-
-    print("\n[INFO] Analyzing uncertainty...")
+    samples = generate_mc_samples(image_path, num_samples=num_samples)
+    if not samples:
+        print("[UNCERTAINTY_ERROR] Failed to generate MC samples for full analysis.")
+        return []
     scored_sentences = sentence_level_uncertainty(samples)
-
-    print("\n--- Sentence-Level Uncertainty Report ---")
-    for i, (sent, score) in enumerate(scored_sentences, 1):
-        print(f"Sentence {i}: ({score:.4f}) {sent}")
-
-    print(f"\n[INFO] Total analysis time: {time.time() - total_start_time:.2f} seconds")
     return scored_sentences
 
 # --- Main ---
 if __name__ == "__main__":
-    image_path = "image1.jpg"
-    if not os.path.exists(image_path):
-        print(f"[ERROR] Test image not found: {image_path}. Please place a test image or update the path.")
+    if not all([processor, tokenizer, model]):
+        print("[UNCERTAINTY_MAIN_ERROR] Cannot run standalone test: critical components failed to load during module import.")
     else:
-        analyze_image(image_path, num_samples=10)
+        test_image_path = os.path.join(os.path.dirname(__file__), "image1.jpg") 
+        if not os.path.exists(test_image_path):
+            print(f"[UNCERTAINTY_MAIN_ERROR] Test image not found: {test_image_path}.")
+        else:
+            analyze_image(test_image_path, num_samples=10)

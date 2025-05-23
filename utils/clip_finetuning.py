@@ -9,17 +9,8 @@ import os
 def main():
     print(f"Using device: {config.DEVICE}")
 
-    # --- Load Dataset ---
-    # Replace with your actual dataset loading logic
-    # Example: Load from Hub
-    # Or load from local files (implement this part)
-    # hf_dataset = load_my_local_dataset(...)
-    # For demonstration, let's assume hf_dataset is loaded and has 'train', 'validation' splits
-    # Make sure it has 'image', 'findings', 'impression' columns
     print("Loading dataset...")
-    # This is a placeholder - replace with your actual data loading
-    # For example: hf_dataset = load_dataset("csv", data_files={"train": "path/to/train.csv", ...})
-    # hf_dataset = None # REPLACE THIS
+
     try:
         hf_dataset = load_dataset("itsanmolgupta/mimic-cxr-cleaned-old")
         print("Dataset loaded successfully.")
@@ -28,9 +19,6 @@ def main():
         # # --- Select a subset for testing --- 
         # print("Selecting the first 5000 training samples for a test run...")
         # hf_dataset['train'] = hf_dataset['train'].select(range(5000))
-        # # If using validation, select a subset too (e.g., first 500)
-        # # if 'validation' in hf_dataset:
-        # #     hf_dataset['validation'] = hf_dataset['validation'].select(range(500))
         # print(f"Using subset: {hf_dataset}")
         # # ------------------------------------
 

@@ -85,12 +85,9 @@ def main():
         print("Dataset loaded successfully.")
         print(f"Dataset structure: {hf_dataset}")
 
-        # # --- Select a subset for testing --- 
+        # # --- Select a subset for testing ---
         # print("Selecting the first 5000 training samples for a test run...")
         # hf_dataset['train'] = hf_dataset['train'].select(range(5000))
-        # # If using validation, select a subset too (e.g., first 500)
-        # # if 'validation' in hf_dataset:
-        # #     hf_dataset['validation'] = hf_dataset['validation'].select(range(500))
         # print(f"Using subset: {hf_dataset}")
         # # ------------------------------------
     except Exception as e:
@@ -159,4 +156,3 @@ def main():
 
 if __name__ == "__main__":
     main() # Call the main function
- 
